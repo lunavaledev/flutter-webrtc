@@ -108,7 +108,16 @@
               fullWidth, fullHeight, outW, outH, capW, capH);
       }
       config.minimumFrameInterval = CMTimeMake(1, (int32_t)MAX(1, fps));
-      config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+      // Align with H.264/WebRTC defaults: limited-range NV12 (420v) + sRGB +
+      // BT.709. Full-range (420f) on Liquid Retina XDR often gets tagged as
+      // limited downstream, crushing mid-grays to near-black. Force SDR so
+      // Display P3 / HDR panels do not ship wide-gamut frames into encode.
+      config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+      config.colorSpaceName = kCGColorSpaceSRGB;
+      config.colorMatrix = kCGDisplayStreamYCbCrMatrix_ITU_R_709_2;
+      if (@available(macOS 15.0, *)) {
+        config.captureDynamicRange = SCCaptureDynamicRangeSDR;
+      }
       // Keep a small SCK surface queue. Downstream WebRTC encoding may hold
       // frames briefly; a deeper queue just delays the stall when buffers are
       // retained. We copy out of the SCK surface in the callback instead.
@@ -305,6 +314,9 @@
     CVPixelBufferRelease(copy);
     return NULL;
   }
+  // Keep primaries / transfer / YCbCr matrix so the subsequent toI420()
+  // path and encoder see the same limited-range BT.709 metadata SCK emitted.
+  CVBufferPropagateAttachments(source, copy);
   return copy;
 }
 
@@ -351,12 +363,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   CMTime timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
   int64_t timeStampNs = (int64_t)(CMTimeGetSeconds(timestamp) * 1000000000.0);
 
-  id<RTCVideoFrameBuffer> rtcBuffer = [[RTCCVPixelBuffer alloc] initWithPixelBuffer:pixelBuffer];
-  RTCVideoFrame *frame = [[RTCVideoFrame alloc] initWithBuffer:rtcBuffer
+  // Normalize NV12 -> I420 before encode (UU-style preprocess). This makes
+  // range/matrix handling explicit instead of relying on CVPixelBuffer
+  // attachments surviving the VideoToolbox path.
+  RTCCVPixelBuffer *cvBuffer = [[RTCCVPixelBuffer alloc] initWithPixelBuffer:pixelBuffer];
+  id<RTCI420Buffer> i420Buffer = [cvBuffer toI420];
+  CVPixelBufferRelease(pixelBuffer);
+  if (i420Buffer == nil) {
+    return;
+  }
+
+  RTCVideoFrame *frame = [[RTCVideoFrame alloc] initWithBuffer:i420Buffer
                                                       rotation:RTCVideoRotation_0
                                                    timeStampNs:timeStampNs];
   [self.delegate capturer:self.capturer didCaptureVideoFrame:frame];
-  CVPixelBufferRelease(pixelBuffer);
 }
 #endif
 
