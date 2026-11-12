@@ -48,6 +48,7 @@
                    sourceId:(NSString* _Nullable)sourceId
                    maxWidth:(NSInteger)maxWidth
                   maxHeight:(NSInteger)maxHeight
+                 showCursor:(BOOL)showCursor
                   onStarted:(void (^)(NSError * _Nullable error))onStarted {
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
   if (@available(macOS 12.3, *)) {
@@ -123,7 +124,8 @@
       // retained. We copy out of the SCK surface in the callback instead.
       config.queueDepth = 3;
       if (@available(macOS 13.0, *)) {
-        config.showsCursor = YES;
+        // Remote-control default is never: cursor must not scale with the video.
+        config.showsCursor = showCursor;
       }
 
       self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
