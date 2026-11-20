@@ -17,9 +17,13 @@ FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
       FlutterScreenCapture::FlutterScreenCapture(this),
       FlutterDataChannel::FlutterDataChannel(this),
       FlutterFrameCryptor::FlutterFrameCryptor(this),
-      FlutterDataPacketCryptor::FlutterDataPacketCryptor(this) {}
+      FlutterDataPacketCryptor::FlutterDataPacketCryptor(this) {
+  host_frames_ = std::make_unique<FlutterHostFrameSource>(this);
+}
 
-FlutterWebRTC::~FlutterWebRTC() {}
+FlutterWebRTC::~FlutterWebRTC() {
+  host_frames_.reset();
+}
 
 void FlutterWebRTC::HandleMethodCall(
     const MethodCallProxy& method_call,
@@ -533,6 +537,17 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string track_id = findString(params, "trackId");
     MediaStreamTrackSwitchCamera(track_id, std::move(result));
+  } else if (method_call.method_name().compare("setAdmVolumes") == 0) {
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "setAdmVolumes() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*method_call.arguments());
+    const std::optional<double> speaker = maybeFindDouble(params, "speaker");
+    const std::optional<double> microphone =
+        maybeFindDouble(params, "microphone");
+    SetAdmVolumes(speaker.value_or(1.0), microphone.value_or(1.0));
+    result->Success();
   } else if (method_call.method_name().compare("setVolume") == 0) {
     auto args = method_call.arguments();
     if (!args) {
@@ -1048,6 +1063,27 @@ void FlutterWebRTC::HandleMethodCall(
 
   } else if (method_call.method_name().compare("createLocalMediaStream") == 0) {
     CreateLocalMediaStream(std::move(result));
+  } else if (method_call.method_name().compare("createCustomVideoTrack") == 0) {
+    if (!host_frames_) {
+      result->Error("createCustomVideoTrack", "host frames unavailable");
+      return;
+    }
+    host_frames_->CreateCustomVideoTrack(std::move(result));
+  } else if (method_call.method_name().compare("startHostShmCapture") == 0) {
+    if (!method_call.arguments() || !host_frames_) {
+      result->Error("startHostShmCapture", "bad args");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    host_frames_->StartHostShmCapture(findString(params, "trackId"),
+                                      std::move(result));
+  } else if (method_call.method_name().compare("stopHostShmCapture") == 0) {
+    if (!host_frames_) {
+      result->Error("stopHostShmCapture", "host frames unavailable");
+      return;
+    }
+    host_frames_->StopHostShmCapture(std::move(result));
   } else if (method_call.method_name().compare("canInsertDtmf") == 0) {
     if (!method_call.arguments()) {
       result->Error("Bad Arguments", "Null constraints arguments received");

@@ -1,12 +1,7 @@
 include(ExternalProject)
 
-# Flutter adds plugins to example builds through .plugin_symlinks. Windows
-# CMake refuses to extract archives through that symlink path, so resolve the
-# real third_party directory before downloading or extracting libwebrtc.
 get_filename_component(LIBWEBRTC_THIRD_PARTY_DIR "${CMAKE_CURRENT_LIST_DIR}" REALPATH)
 
-# Load binary version + download URL template from libwebrtc_version.ini so
-# bumping the prebuilt release does not require editing CMake.
 set(LIBWEBRTC_VERSION_INI "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc_version.ini")
 if(NOT EXISTS "${LIBWEBRTC_VERSION_INI}")
   message(FATAL_ERROR "libwebrtc: missing version manifest at ${LIBWEBRTC_VERSION_INI}")
@@ -17,7 +12,6 @@ set(LIBWEBRTC_DOWNLOAD_URL_BASE "")
 file(STRINGS "${LIBWEBRTC_VERSION_INI}" _libwebrtc_ini_lines)
 foreach(_line IN LISTS _libwebrtc_ini_lines)
   string(STRIP "${_line}" _line)
-  # Skip blanks, comments (# or ;) and section headers ([name]).
   if(_line STREQUAL "" OR _line MATCHES "^[#;]" OR _line MATCHES "^\\[.*\\]$")
     continue()
   endif()
@@ -37,10 +31,8 @@ if(LIBWEBRTC_BINARY_VERSION STREQUAL "" OR LIBWEBRTC_DOWNLOAD_URL_BASE STREQUAL 
   message(FATAL_ERROR "libwebrtc: ${LIBWEBRTC_VERSION_INI} must define binary_version and download_url")
 endif()
 
-# Strip any trailing slashes so we control the separator when composing the URL.
 string(REGEX REPLACE "/+$" "" LIBWEBRTC_DOWNLOAD_URL_BASE "${LIBWEBRTC_DOWNLOAD_URL_BASE}")
 
-# Resolve OS field for the release asset name (win / linux)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   set(LIBWEBRTC_OS "win")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -49,14 +41,11 @@ else()
   message(FATAL_ERROR "libwebrtc: unsupported target OS '${CMAKE_SYSTEM_NAME}'")
 endif()
 
-# Resolve arch field for the release asset name (x64 / arm64)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-  # Visual Studio generator exposes the selected arch via CMAKE_GENERATOR_PLATFORM
   string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" _libwebrtc_plat)
   if(_libwebrtc_plat STREQUAL "arm64")
     set(LIBWEBRTC_ARCH "arm64")
   elseif(_libwebrtc_plat STREQUAL "x64" OR _libwebrtc_plat STREQUAL "")
-    # Empty platform usually means Ninja/default x64 host build
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
       set(LIBWEBRTC_ARCH "x64")
     else()
@@ -66,7 +55,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     message(FATAL_ERROR "libwebrtc: unsupported Windows arch '${CMAKE_GENERATOR_PLATFORM}'")
   endif()
 else()
-  # Flutter Linux / eLinux pass the target as e.g. linux-x64 or linux-arm64
   if(DEFINED FLUTTER_TARGET_PLATFORM AND FLUTTER_TARGET_PLATFORM MATCHES "arm64")
     set(LIBWEBRTC_ARCH "arm64")
   elseif(DEFINED FLUTTER_TARGET_PLATFORM AND FLUTTER_TARGET_PLATFORM MATCHES "x64")
@@ -79,15 +67,16 @@ else()
 endif()
 
 set(LIBWEBRTC_ASSET "libwebrtc-${LIBWEBRTC_OS}-${LIBWEBRTC_ARCH}-release")
-set(ZIPFILE "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${LIBWEBRTC_ASSET}.zip")
-
-# Final URL = <base>/<binary_version>/<asset>.zip
+set(ZIPFILE "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${LIBWEBRTC_BINARY_VERSION}-${LIBWEBRTC_ASSET}.zip")
+set(LIBWEBRTC_STAMP "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc/.binary_version")
 set(DOWNLOAD_URL "${LIBWEBRTC_DOWNLOAD_URL_BASE}/${LIBWEBRTC_BINARY_VERSION}/${LIBWEBRTC_ASSET}.zip")
 
-function(_libwebrtc_extract_and_normalize zip_path dest_dir)
-  # Extract into an isolated staging dir so we can normalize the top-level
-  # layout regardless of what folder name the archive uses (e.g.
-  # libwebrtc-linux-x64-release/ vs. libwebrtc/ vs. files at the root).
+set(_legacy_zip "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${LIBWEBRTC_ASSET}.zip")
+if(EXISTS "${_legacy_zip}" AND NOT EXISTS "${ZIPFILE}")
+  file(RENAME "${_legacy_zip}" "${ZIPFILE}")
+endif()
+
+function(_libwebrtc_extract_and_normalize zip_path dest_dir binary_version)
   set(_staging "${dest_dir}/.libwebrtc_extract")
   file(REMOVE_RECURSE "${_staging}")
   file(MAKE_DIRECTORY "${_staging}")
@@ -108,7 +97,6 @@ function(_libwebrtc_extract_and_normalize zip_path dest_dir)
     endif()
   endif()
   if(NOT _promoted)
-    # Archive root holds the files directly — wrap them in libwebrtc/.
     file(MAKE_DIRECTORY "${dest_dir}/libwebrtc")
     foreach(_entry IN LISTS _entries)
       get_filename_component(_name "${_entry}" NAME)
@@ -117,8 +105,10 @@ function(_libwebrtc_extract_and_normalize zip_path dest_dir)
   endif()
 
   file(REMOVE_RECURSE "${_staging}")
+  file(WRITE "${dest_dir}/libwebrtc/.binary_version" "${binary_version}\n")
 endfunction()
 
+set(_need_extract FALSE)
 if(NOT EXISTS "${ZIPFILE}")
   message(NOTICE "download: ${DOWNLOAD_URL}")
   file(MAKE_DIRECTORY "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads")
@@ -130,12 +120,27 @@ if(NOT EXISTS "${ZIPFILE}")
   if(NOT download_status EQUAL 0)
     message(FATAL_ERROR "Failed to download dependency: ${download_log}")
   endif()
-
-  _libwebrtc_extract_and_normalize("${ZIPFILE}" "${LIBWEBRTC_THIRD_PARTY_DIR}")
-else()
-  if(NOT EXISTS "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc")
-    message(NOTICE "libwebrtc directory does not exist after extraction.")
-    _libwebrtc_extract_and_normalize("${ZIPFILE}" "${LIBWEBRTC_THIRD_PARTY_DIR}")
+  set(_need_extract TRUE)
+elseif(NOT EXISTS "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc")
+  set(_need_extract TRUE)
+elseif(EXISTS "${LIBWEBRTC_STAMP}")
+  file(READ "${LIBWEBRTC_STAMP}" _installed_version)
+  string(STRIP "${_installed_version}" _installed_version)
+  if(NOT _installed_version STREQUAL LIBWEBRTC_BINARY_VERSION)
+    message(NOTICE "libwebrtc version mismatch (${_installed_version} -> ${LIBWEBRTC_BINARY_VERSION}), re-extracting")
+    set(_need_extract TRUE)
   endif()
+else()
+  message(NOTICE "libwebrtc missing version stamp, re-extracting ${LIBWEBRTC_BINARY_VERSION}")
+  set(_need_extract TRUE)
+endif()
+
+if(_need_extract)
+  _libwebrtc_extract_and_normalize(
+    "${ZIPFILE}"
+    "${LIBWEBRTC_THIRD_PARTY_DIR}"
+    "${LIBWEBRTC_BINARY_VERSION}"
+  )
+else()
   message(TRACE "libwebrtc already downloaded.")
 endif()

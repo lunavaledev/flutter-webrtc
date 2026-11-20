@@ -16,7 +16,9 @@ class Helper {
   /// so nothing changes unless an app opts out. Set it to `false` to avoid the
   /// "double cursor" viewers see when the sharer's pointer is drawn on top of
   /// their own. Web is unaffected: the browser owns cursor handling there.
-  static bool screenCaptureShowCursor = true;
+  // Remote-control default: never bake cursor into frames (UU-style local cursor).
+  // Meetings that need cursor in video pass video.cursor=always explicitly.
+  static bool screenCaptureShowCursor = false;
 
   /// Show/hide the broadcaster's mouse cursor in desktop screen capture.
   /// Applies to the NEXT screen share started via getDisplayMedia; an already

@@ -32,6 +32,7 @@
 #import "LocalTrack.h"
 #import "LocalAudioTrack.h"
 #import "LocalVideoTrack.h"
+#import "FlutterHostShmCapturer.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wprotocol"
@@ -602,6 +603,14 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* constraints = argsMap[@"constraints"];
     [self getDisplayMedia:constraints result:result];
+  } else if ([@"createCustomVideoTrack" isEqualToString:call.method]) {
+    [self createCustomVideoTrack:result];
+  } else if ([@"startHostShmCapture" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    NSString* trackId = argsMap[@"trackId"];
+    [self startHostShmCapture:trackId result:result];
+  } else if ([@"stopHostShmCapture" isEqualToString:call.method]) {
+    [self stopHostShmCapture:result];
   } else if ([@"requestCapturePermission" isEqualToString:call.method]) {
 #if TARGET_OS_OSX || TARGET_OS_MACCATALYST
     if (@available(macOS 10.15, macCatalyst 13.1, *)) {

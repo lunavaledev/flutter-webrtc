@@ -6,6 +6,7 @@
 #include "flutter_data_channel.h"
 #include "flutter_data_packet_cryptor.h"
 #include "flutter_frame_cryptor.h"
+#include "flutter_host_frame_source.h"
 #include "flutter_media_stream.h"
 #include "flutter_peerconnection.h"
 #include "flutter_screen_capture.h"
@@ -45,6 +46,8 @@ class FlutterWebRTC : public FlutterWebRTCBase,
  private:
   void initLoggerCallback(RTCLoggingSeverity severity);
   RTCLoggingSeverity str2LogSeverity(std::string str);
+
+  std::unique_ptr<FlutterHostFrameSource> host_frames_;
 };
 
 }  // namespace flutter_webrtc_plugin

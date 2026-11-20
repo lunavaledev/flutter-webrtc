@@ -127,8 +127,11 @@ FlutterScreenCapture::FlutterScreenCapture(FlutterWebRTCBase* base)
 
 FlutterScreenCapture::~FlutterScreenCapture() {
   closing_ = true;
-
-  // From here on libwebrtc callbacks no longer reach this object.
+#if defined(_WIN32)
+  if (gdi_pump_) {
+    gdi_pump_->Stop();
+  }
+#endif
   observer_proxy_->Detach();
 
   // Stop the capturers that are still running, so that their capture loops
@@ -235,6 +238,73 @@ scoped_refptr<MediaSource> FlutterScreenCapture::FindSource(
   return source;
 }
 
+scoped_refptr<MediaSource> FlutterScreenCapture::ResolveDisplaySource(
+    const std::string& source_id) {
+  scoped_refptr<MediaSource> source = FindSource(source_id);
+  auto sources = SourcesSnapshot();
+  const bool want_primary = source_id == "0" || source_id == "screen:0" ||
+                            source_id.empty();
+  if (!source.get() && !sources.empty() && want_primary) {
+    return sources.front();
+  }
+  if (source.get()) {
+    return source;
+  }
+#ifdef __linux__
+  EncodableList types;
+  types.push_back(EncodableValue(std::string("screen")));
+  BuildDesktopSourcesList(types, true);
+  source = FindSource(source_id);
+  sources = SourcesSnapshot();
+  if (!source.get() && !sources.empty() && want_primary) {
+    source = sources.front();
+  }
+#endif
+  return source;
+}
+
+#if defined(_WIN32)
+bool FlutterScreenCapture::StartGdiPrimaryDesktop(
+    const std::string& uuid,
+    scoped_refptr<RTCMediaStream> stream,
+    EncodableMap* params,
+    const EncodableMap& video_constraints,
+    double fps) {
+  if (!gdi_pump_) {
+    gdi_pump_ = std::make_unique<GdiDesktopPump>();
+  }
+  scoped_refptr<RTCVideoSource> video_source =
+      base_->factory_->CreateCustomVideoSource(
+          "gdi_desktop", base_->ParseMediaConstraints(video_constraints));
+  if (!video_source.get()) {
+    return false;
+  }
+  scoped_refptr<RTCVideoTrack> track =
+      base_->factory_->CreateVideoTrack(video_source, uuid.c_str());
+  if (!track.get()) {
+    return false;
+  }
+  if (!gdi_pump_->Start(video_source, static_cast<uint32_t>(fps))) {
+    return false;
+  }
+
+  EncodableList videoTracks;
+  EncodableMap info;
+  info[EncodableValue("id")] = EncodableValue(track->id().std_string());
+  info[EncodableValue("label")] = EncodableValue(track->id().std_string());
+  info[EncodableValue("kind")] = EncodableValue(track->kind().std_string());
+  info[EncodableValue("enabled")] = EncodableValue(track->enabled());
+  videoTracks.push_back(EncodableValue(info));
+  (*params)[EncodableValue("videoTracks")] = EncodableValue(videoTracks);
+
+  stream->AddTrack(track);
+  base_->local_tracks_[track->id().std_string()] = track;
+  base_->video_sources_[track->id().std_string()] = {video_source};
+  base_->local_streams_[uuid] = stream;
+  return true;
+}
+#endif
+
 bool FlutterScreenCapture::BuildDesktopSourcesList(const EncodableList& types,
                                                    bool force_reload) {
   std::lock_guard<std::mutex> build_lock(build_mutex_);
@@ -304,13 +374,25 @@ void FlutterScreenCapture::GetDesktopSources(
           EncodableValue(SanitizeUtf8ForFlutter(source->name().std_string()));
       info[EncodableValue("type")] =
           EncodableValue(source->type() == kWindow ? "window" : "screen");
-      // TODO "thumbnailSize"
       info[EncodableValue("thumbnailSize")] = EncodableMap{
           {EncodableValue("width"), EncodableValue(0)},
           {EncodableValue("height"), EncodableValue(0)},
       };
       sources.push_back(EncodableValue(info));
     }
+#if defined(_WIN32)
+    if (sources.empty()) {
+      EncodableMap info;
+      info[EncodableValue("id")] = EncodableValue(std::string("0"));
+      info[EncodableValue("name")] = EncodableValue(std::string("Screen 1"));
+      info[EncodableValue("type")] = EncodableValue(std::string("screen"));
+      info[EncodableValue("thumbnailSize")] = EncodableMap{
+          {EncodableValue("width"), EncodableValue(0)},
+          {EncodableValue("height"), EncodableValue(0)},
+      };
+      sources.push_back(EncodableValue(info));
+    }
+#endif
 
     auto map = EncodableMap();
     map[EncodableValue("sources")] = sources;
@@ -573,42 +655,37 @@ void FlutterScreenCapture::GetDisplayMedia(
     video_constraints = GetValue<EncodableMap>(it->second);
   }
 
-  scoped_refptr<MediaSource> source = FindSource(source_id);
+  scoped_refptr<MediaSource> source = ResolveDisplaySource(source_id);
 
-#ifdef __linux__
-  // If the caller didn't specify a source (source_id == "0"), fall back to
-  // the first available screen. When a specific source_id was requested but
-  // isn't in the (possibly stale) cached list, rebuild the list and retry
-  // the match instead of silently capturing the wrong source.
-  // This fallback builds the list on the platform thread. That is safe on
-  // Linux, where enumerating windows does not wait on their message loops.
-  {
-    auto sources = SourcesSnapshot();
-    if (!source.get() && !sources.empty() && source_id == "0") {
-      source = sources.front();
-    }
-  }
   if (!source.get()) {
-    EncodableList types;
-    types.push_back(EncodableValue(std::string("screen")));
-    BuildDesktopSourcesList(types, true);
-    source = FindSource(source_id);
-    auto sources = SourcesSnapshot();
-    if (!source.get() && !sources.empty() && source_id == "0") {
-      source = sources.front();
+#if defined(_WIN32)
+    if (StartGdiPrimaryDesktop(uuid, stream, &params, video_constraints,
+                               fps)) {
+      result->Success(EncodableValue(params));
+      return;
     }
-  }
 #endif
-
-  if (!source.get()) {
     result->Error("Bad Arguments", "source not found!");
     return;
   }
+
+#if defined(_WIN32)
+  if (gdi_pump_) {
+    gdi_pump_->Stop();
+  }
+#endif
 
   scoped_refptr<RTCDesktopCapturer> desktop_capturer =
       base_->desktop_device_->CreateDesktopCapturer(source, show_cursor);
 
   if (!desktop_capturer.get()) {
+#if defined(_WIN32)
+    if (StartGdiPrimaryDesktop(uuid, stream, &params, video_constraints,
+                               fps)) {
+      result->Success(EncodableValue(params));
+      return;
+    }
+#endif
     result->Error("Bad Arguments", "CreateDesktopCapturer failed!");
     return;
   }

@@ -4,18 +4,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_webrtc/src/native/rtc_peerconnection_impl.dart';
 
-/// Pins the platform-channel call order that the darwin native plugin
-/// relies on when a peer connection is torn down.
-///
-/// close() invokes peerConnectionClose, and dispose() must cancel the
-/// event channel subscription before it invokes peerConnectionDispose.
-/// The darwin plugin only releases the event channel's stream handler
-/// on peerConnectionDispose. If cancel reached the platform after that
-/// call, the handler would already be gone and Flutter would report a
-/// MissingPluginException for the event channel's cancel method instead
-/// of tearing down cleanly.
+import 'ensure_test_binding.dart';
+
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
+  ensureTestBinding();
 
   const peerConnectionId = 'pc-order-test';
   final methodChannel = MethodChannel('FlutterWebRTC.Method');

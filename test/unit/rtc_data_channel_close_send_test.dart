@@ -5,11 +5,10 @@ import 'package:webrtc_interface/webrtc_interface.dart';
 
 import 'package:flutter_webrtc/src/native/rtc_data_channel_impl.dart';
 
-/// close() has to establish a terminal Dart-side state and reject any send()
-/// issued afterward locally, rather than leaving `state` stale and letting
-/// the send reach the platform channel after native teardown. See #2156.
+import 'ensure_test_binding.dart';
+
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
+  ensureTestBinding();
 
   const peerConnectionId = 'pc-data-channel-close-send-test';
   const flutterId = 'dc-close-send';

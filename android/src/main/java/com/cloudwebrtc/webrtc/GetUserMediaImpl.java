@@ -380,7 +380,23 @@ public class GetUserMediaImpl {
         return null;
     }
 
+    private int audioHolds;
+
+    void releaseLocalAudio() {
+        if (audioHolds <= 0) return;
+        audioHolds--;
+        if (audioHolds == 0) {
+            ScreenCaptureService.release(applicationContext, ScreenCaptureService.TYPE_MICROPHONE);
+        }
+    }
+
     private ConstraintsMap getUserAudio(ConstraintsMap constraints, MediaStream stream) {
+        audioHolds++;
+        ScreenCaptureService.ensure(
+                applicationContext,
+                ScreenCaptureService.TYPE_MICROPHONE,
+                () -> {},
+                () -> {});
         AudioSwitchManager.instance.start();
         MediaConstraints audioConstraints = new MediaConstraints();
         String deviceId = null;
@@ -509,24 +525,55 @@ public class GetUserMediaImpl {
 
     void getDisplayMedia(
             final ConstraintsMap constraints, final Result result, final MediaStream mediaStream) {
-        if (mediaProjectionData == null) {
+        final boolean reuseForbidden = Build.VERSION.SDK_INT >= 34;
+        if (mediaProjectionData == null || reuseForbidden) {
+            mediaProjectionData = null;
             screenRequestPermissions(
                     new ResultReceiver(new Handler(Looper.getMainLooper())) {
                         @Override
                         protected void onReceiveResult(int requestCode, Bundle resultData) {
-                            Intent mediaProjectionData = resultData.getParcelable(PROJECTION_DATA);
+                            Intent projectionData = resultData.getParcelable(PROJECTION_DATA);
                             int resultCode = resultData.getInt(GRANT_RESULTS);
 
                             if (resultCode != Activity.RESULT_OK) {
                                 resultError("screenRequestPermissions", "User didn't give permission to capture the screen.", result);
                                 return;
                             }
-                            getDisplayMedia(result, mediaStream, mediaProjectionData);
+                            startDisplayMedia(result, mediaStream, projectionData);
                         }
                     });
         } else {
-            getDisplayMedia(result, mediaStream, mediaProjectionData);
+            startDisplayMedia(result, mediaStream, mediaProjectionData);
         }
+    }
+
+    private void startDisplayMedia(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
+        ScreenCaptureService.ensure(
+                applicationContext,
+                ScreenCaptureService.TYPE_PROJECTION,
+                () -> {
+                    try {
+                        getDisplayMedia(result, mediaStream, mediaProjectionData);
+                    } catch (Exception e) {
+                        Log.e(TAG, "getDisplayMedia failed", e);
+                        if (!hasScreenCapturer()) {
+                            ScreenCaptureService.release(
+                                    applicationContext, ScreenCaptureService.TYPE_PROJECTION);
+                        }
+                        resultError("getDisplayMedia", "GetDisplayMediaFailed: " + e.getMessage(), result);
+                    }
+                },
+                () -> resultError(
+                        "getDisplayMedia",
+                        "Foreground service failed for MediaProjection",
+                        result));
+    }
+
+    private boolean hasScreenCapturer() {
+        for (VideoCapturerInfoEx info : mVideoCapturers.values()) {
+            if (info.isScreenCapture) return true;
+        }
+        return false;
     }
 
     private void getDisplayMedia(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
@@ -573,7 +620,14 @@ public class GetUserMediaImpl {
         info.isScreenCapture = true;
         info.capturer = videoCapturer;
 
-        videoCapturer.startCapture(info.width, info.height, info.fps);
+        try {
+            videoCapturer.startCapture(info.width, info.height, info.fps);
+        } catch (RuntimeException e) {
+            videoCapturer.dispose();
+            surfaceTextureHelper.dispose();
+            videoSource.dispose();
+            throw e;
+        }
         Log.d(TAG, "OrientationAwareScreenCapturer.startCapture: " + info.width + "x" + info.height + "@" + info.fps);
 
         String trackId = stateProvider.getNextTrackUUID();
@@ -636,6 +690,7 @@ public class GetUserMediaImpl {
                 && (trackParams[1] = getUserVideo(constraints, mediaStream)) == null)) {
             for (MediaStreamTrack track : mediaStream.audioTracks) {
                 if (track != null) {
+                    releaseLocalAudio();
                     track.dispose();
                 }
             }
@@ -1017,6 +1072,13 @@ public class GetUserMediaImpl {
                     helper.stopListening();
                     helper.dispose();
                     mSurfaceTextureHelpers.remove(id);
+                }
+                if (info.isScreenCapture) {
+                    mediaProjectionData = null;
+                    if (!hasScreenCapturer()) {
+                        ScreenCaptureService.release(
+                                applicationContext, ScreenCaptureService.TYPE_PROJECTION);
+                    }
                 }
             }
         }

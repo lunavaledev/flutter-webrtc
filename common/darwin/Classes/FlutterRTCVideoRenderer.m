@@ -1,7 +1,10 @@
 #import "FlutterRTCVideoRenderer.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <CoreGraphics/CGColorSpace.h>
 #import <CoreGraphics/CGImage.h>
+#import <CoreVideo/CoreVideo.h>
+#import <stdarg.h>
 #import <WebRTC/RTCYUVHelper.h>
 #import <WebRTC/RTCYUVPlanarBuffer.h>
 #import <WebRTC/WebRTC.h>
@@ -10,6 +13,215 @@
 
 #import "FlutterWebRTCPlugin.h"
 #import <os/lock.h>
+
+typedef NS_ENUM(NSInteger, RdYuvRange) {
+  RdYuvRangeUnknown = 0,
+  RdYuvRangeLimited = 1,
+  RdYuvRangeFull = 2,
+};
+
+static void RdRendererLog(NSString* format, ...) NS_FORMAT_FUNCTION(1, 2) {
+  va_list args;
+  va_start(args, format);
+  NSString* line = [[NSString alloc] initWithFormat:format arguments:args];
+  va_end(args);
+  NSLog(@"[rd-renderer] %@", line);
+
+  @autoreleasepool {
+    NSString* home = NSHomeDirectory();
+    if (home.length == 0) {
+      return;
+    }
+    NSString* dir = [home stringByAppendingPathComponent:
+                         @"Library/Application Support/cn.geekery.remoteDesktop/logs"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    NSString* path = [dir stringByAppendingPathComponent:@"renderer_diag.log"];
+    NSString* stamped =
+        [NSString stringWithFormat:@"%@ %@\n", [NSDate date], line];
+    NSData* data = [stamped dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileHandle* fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) {
+      [data writeToFile:path atomically:NO];
+      return;
+    }
+    @try {
+      [fh seekToEndOfFile];
+      [fh writeData:data];
+      [fh closeFile];
+    } @catch (__unused NSException* e) {
+      [fh closeFile];
+    }
+  }
+}
+
+static inline uint8_t RdClampU8(int v) {
+  if (v < 0) return 0;
+  if (v > 255) return 255;
+  return (uint8_t)v;
+}
+
+// JPEG/full-range BT.601 style I420 -> BGRA (byte order B,G,R,A).
+// Used when sampled Y clearly occupies 0..255 instead of 16..235.
+static void RdI420FullToBGRA(const uint8_t* srcY,
+                             int strideY,
+                             const uint8_t* srcU,
+                             int strideU,
+                             const uint8_t* srcV,
+                             int strideV,
+                             uint8_t* dstBGRA,
+                             int dstStride,
+                             int width,
+                             int height) {
+  for (int j = 0; j < height; ++j) {
+    const uint8_t* yRow = srcY + j * strideY;
+    const uint8_t* uRow = srcU + (j / 2) * strideU;
+    const uint8_t* vRow = srcV + (j / 2) * strideV;
+    uint8_t* dst = dstBGRA + j * dstStride;
+    for (int i = 0; i < width; ++i) {
+      const int Y = yRow[i];
+      const int U = uRow[i / 2] - 128;
+      const int V = vRow[i / 2] - 128;
+      // Fixed-point approx of full-range BT.601.
+      const int R = Y + ((91881 * V + 32768) >> 16);
+      const int G = Y - ((22554 * U + 46802 * V + 32768) >> 16);
+      const int B = Y + ((116130 * U + 32768) >> 16);
+      dst[i * 4 + 0] = RdClampU8(B);
+      dst[i * 4 + 1] = RdClampU8(G);
+      dst[i * 4 + 2] = RdClampU8(R);
+      dst[i * 4 + 3] = 255;
+    }
+  }
+}
+
+static RdYuvRange RdSampleI420Range(id<RTCI420Buffer> buffer,
+                                    int* outMinY,
+                                    int* outMaxY,
+                                    int* outBelow12,
+                                    int* outAbove235,
+                                    int* outSamples) {
+  const int width = buffer.width;
+  const int height = buffer.height;
+  if (width <= 0 || height <= 0) {
+    return RdYuvRangeUnknown;
+  }
+  const uint8_t* yPlane = buffer.dataY;
+  const int strideY = buffer.strideY;
+  int minY = 255;
+  int maxY = 0;
+  int below12 = 0;
+  int above235 = 0;
+  int samples = 0;
+  // ~32x32 grid across the frame keeps this cheap on the render thread.
+  const int stepX = MAX(1, width / 32);
+  const int stepY = MAX(1, height / 32);
+  for (int j = 0; j < height; j += stepY) {
+    const uint8_t* row = yPlane + j * strideY;
+    for (int i = 0; i < width; i += stepX) {
+      const int y = row[i];
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (y < 12) ++below12;
+      if (y > 235) ++above235;
+      ++samples;
+    }
+  }
+  if (outMinY) *outMinY = minY;
+  if (outMaxY) *outMaxY = maxY;
+  if (outBelow12) *outBelow12 = below12;
+  if (outAbove235) *outAbove235 = above235;
+  if (outSamples) *outSamples = samples;
+  if (samples <= 0) {
+    return RdYuvRangeUnknown;
+  }
+  // Two strong full-range signals for desktop remoting:
+  // 1) Y population below the limited pedestal (true blacks in 0..11)
+  // 2) Y population above limited white (236..255). Hardware H.264 decode on
+  //    Apple often expands limited bitstreams to full-range I420; feeding that
+  //    into limited I420ToARGB applies the pedestal removal twice and crushes
+  //    dark UI grays to near-black. above235 is the reliable tell when the
+  //    scene has no true blacks (common on dark themes).
+  if (below12 * 100 >= samples) {  // >= 1%
+    return RdYuvRangeFull;
+  }
+  if (above235 * 100 >= samples) {  // >= 1%
+    return RdYuvRangeFull;
+  }
+  if (maxY >= 250) {
+    return RdYuvRangeFull;
+  }
+  return RdYuvRangeLimited;
+}
+
+static void RdAttachSRGBColorSpace(CVPixelBufferRef pixelBuffer) {
+  if (!pixelBuffer) {
+    return;
+  }
+  // Output is already converted BGRA (display-referred RGB). Only tag sRGB.
+  // Do NOT attach YCbCr matrix / BT.709 transfer — those belong on YUV buffers
+  // and can make Flutter/CoreImage treat RGB as video and crush mid-grays.
+  CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+  if (!space) {
+    space = CGColorSpaceCreateDeviceRGB();
+  }
+  if (!space) {
+    return;
+  }
+  CVBufferSetAttachment(pixelBuffer, kCVImageBufferCGColorSpaceKey, space,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey);
+  CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey);
+  CVBufferRemoveAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey);
+  CGColorSpaceRelease(space);
+}
+
+// Sample decoded BGRA (byte order B,G,R,A) so we can tell crush-before-RGB
+// (Y already low) from crush-after-RGB (display pipeline).
+static void RdSampleBGRA(const uint8_t* bgra,
+                         int stride,
+                         int width,
+                         int height,
+                         int* outMin,
+                         int* outMax,
+                         int* outBelow16,
+                         int* outBelow32,
+                         int* outSamples) {
+  int minV = 255;
+  int maxV = 0;
+  int below16 = 0;
+  int below32 = 0;
+  int samples = 0;
+  if (!bgra || width <= 0 || height <= 0) {
+    if (outMin) *outMin = 0;
+    if (outMax) *outMax = 0;
+    if (outBelow16) *outBelow16 = 0;
+    if (outBelow32) *outBelow32 = 0;
+    if (outSamples) *outSamples = 0;
+    return;
+  }
+  const int stepX = MAX(1, width / 32);
+  const int stepY = MAX(1, height / 32);
+  for (int j = 0; j < height; j += stepY) {
+    const uint8_t* row = bgra + j * stride;
+    for (int i = 0; i < width; i += stepX) {
+      const uint8_t* px = row + i * 4;
+      // luma proxy on RGB channels (already decoded)
+      const int v = (px[0] + px[1] + px[2]) / 3;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+      if (v < 16) ++below16;
+      if (v < 32) ++below32;
+      ++samples;
+    }
+  }
+  if (outMin) *outMin = minV;
+  if (outMax) *outMax = maxV;
+  if (outBelow16) *outBelow16 = below16;
+  if (outBelow32) *outBelow32 = below32;
+  if (outSamples) *outSamples = samples;
+}
 
 @implementation FlutterRTCVideoRenderer {
   CGSize _frameSize;
@@ -20,6 +232,9 @@
   bool _isFirstFrameRendered;
   bool _frameAvailable;
   os_unfair_lock _lock;
+  RdYuvRange _yuvRange;
+  int _diagFramesLeft;
+  int _bgraDiagLeft;
 }
 
 @synthesize textureId = _textureId;
@@ -41,6 +256,9 @@
     _pixelBufferRef = nil;
     _eventSink = nil;
     _rotation = -1;
+    _yuvRange = RdYuvRangeUnknown;
+    _diagFramesLeft = 8;
+    _bgraDiagLeft = 8;
     _textureId = [registry registerTexture:self];
     /*Create Event Channel.*/
     _eventChannel = [FlutterEventChannel
@@ -89,6 +307,9 @@
     _frameSize = CGSizeZero;
     _renderSize = CGSizeZero;
     _rotation = -1;
+    _yuvRange = RdYuvRangeUnknown;
+    _diagFramesLeft = 8;
+    _bgraDiagLeft = 8;
     if (videoTrack) {
       [videoTrack addRenderer:self];
     }
@@ -132,6 +353,32 @@
                       withFrame:(RTCVideoFrame*)frame {
   id<RTCI420Buffer> i420Buffer = [self correctRotation:[frame.buffer toI420]
                                           withRotation:frame.rotation];
+
+  // Sample a sparse Y grid once (then a few more times for logging) so we can
+  // detect full-range desktop frames that would be crushed by limited I420ToARGB.
+  if (_yuvRange == RdYuvRangeUnknown || _diagFramesLeft > 0) {
+    int minY = 0, maxY = 0, below12 = 0, above235 = 0, samples = 0;
+    RdYuvRange sampled = RdSampleI420Range(i420Buffer, &minY, &maxY, &below12,
+                                           &above235, &samples);
+    if (_yuvRange == RdYuvRangeUnknown && sampled != RdYuvRangeUnknown) {
+      _yuvRange = sampled;
+    }
+    if (_diagFramesLeft > 0) {
+      --_diagFramesLeft;
+      RdRendererLog(
+          @"yuv-range sample=%@ decided=%@ minY=%d maxY=%d below12=%d above235=%d "
+           @"samples=%d size=%dx%d",
+          sampled == RdYuvRangeFull
+              ? @"full"
+              : (sampled == RdYuvRangeLimited ? @"limited" : @"unknown"),
+          _yuvRange == RdYuvRangeFull
+              ? @"full"
+              : (_yuvRange == RdYuvRangeLimited ? @"limited" : @"unknown"),
+          minY, maxY, below12, above235, samples, i420Buffer.width,
+          i420Buffer.height);
+    }
+  }
+
   CVPixelBufferLockBaseAddress(outputPixelBuffer, 0);
 
   const OSType pixelFormat = CVPixelBufferGetPixelFormatType(outputPixelBuffer);
@@ -161,18 +408,38 @@
     const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(outputPixelBuffer);
 
     if (pixelFormat == kCVPixelFormatType_32BGRA) {
-      // Corresponds to libyuv::FOURCC_ARGB
-
-      [RTCYUVHelper I420ToARGB:i420Buffer.dataY
-                    srcStrideY:i420Buffer.strideY
-                          srcU:i420Buffer.dataU
-                    srcStrideU:i420Buffer.strideU
-                          srcV:i420Buffer.dataV
-                    srcStrideV:i420Buffer.strideV
-                       dstARGB:dst
-                 dstStrideARGB:(int)bytesPerRow
-                         width:i420Buffer.width
-                        height:i420Buffer.height];
+      if (_yuvRange == RdYuvRangeFull) {
+        // Full-range I420 -> BGRA. Avoid limited I420ToARGB crushing near-black
+        // desktop grays into pure black.
+        RdI420FullToBGRA(i420Buffer.dataY, i420Buffer.strideY, i420Buffer.dataU,
+                         i420Buffer.strideU, i420Buffer.dataV, i420Buffer.strideV,
+                         dst, (int)bytesPerRow, i420Buffer.width,
+                         i420Buffer.height);
+      } else {
+        // Corresponds to libyuv::FOURCC_ARGB (limited-range).
+        [RTCYUVHelper I420ToARGB:i420Buffer.dataY
+                      srcStrideY:i420Buffer.strideY
+                            srcU:i420Buffer.dataU
+                      srcStrideU:i420Buffer.strideU
+                            srcV:i420Buffer.dataV
+                      srcStrideV:i420Buffer.strideV
+                         dstARGB:dst
+                   dstStrideARGB:(int)bytesPerRow
+                           width:i420Buffer.width
+                          height:i420Buffer.height];
+      }
+      if (_bgraDiagLeft > 0) {
+        --_bgraDiagLeft;
+        // Log after convert: if RGB midtones exist here but look black on
+        // screen, the crush is in Flutter texture / color management.
+        int rgbMin = 0, rgbMax = 0, b16 = 0, b32 = 0, n = 0;
+        RdSampleBGRA(dst, (int)bytesPerRow, i420Buffer.width, i420Buffer.height,
+                     &rgbMin, &rgbMax, &b16, &b32, &n);
+        RdRendererLog(@"bgra-after-convert range=%@ rgbMin=%d rgbMax=%d "
+                       @"below16=%d below32=%d samples=%d",
+                      _yuvRange == RdYuvRangeFull ? @"full" : @"limited",
+                      rgbMin, rgbMax, b16, b32, n);
+      }
 
     } else if (pixelFormat == kCVPixelFormatType_32ARGB) {
       // Corresponds to libyuv::FOURCC_BGRA
@@ -272,8 +539,11 @@
     NSDictionary* pixelAttributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
     CVPixelBufferCreate(kCFAllocatorDefault, size.width, size.height, kCVPixelFormatType_32BGRA,
                         (__bridge CFDictionaryRef)(pixelAttributes), &_pixelBufferRef);
+    RdAttachSRGBColorSpace(_pixelBufferRef);
     _frameAvailable = false;
     _frameSize = size;
+    RdRendererLog(@"pixel-buffer created %dx%d with sRGB attachments", (int)size.width,
+                  (int)size.height);
   }
   os_unfair_lock_unlock(&_lock);
 }

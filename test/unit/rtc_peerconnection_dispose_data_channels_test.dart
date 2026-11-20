@@ -6,13 +6,10 @@ import 'package:webrtc_interface/webrtc_interface.dart';
 import 'package:flutter_webrtc/src/native/rtc_data_channel_impl.dart';
 import 'package:flutter_webrtc/src/native/rtc_peerconnection_impl.dart';
 
-/// A peer connection hands out data channel objects that each hold an event
-/// channel subscription and two stream controllers. Nothing else closes them,
-/// so dispose() has to, and it has to do that before the peer connection goes
-/// away because the native dataChannelClose looks the channel up through the
-/// connection.
+import 'ensure_test_binding.dart';
+
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
+  ensureTestBinding();
 
   const peerConnectionId = 'pc-data-channel-test';
   const createdChannelId = 'dc-created';

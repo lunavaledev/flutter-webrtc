@@ -116,6 +116,10 @@ NSArray<RTCDesktopSource*>* _captureSources;
   NSString* sourceId = nil;
   BOOL useDefaultScreen = NO;
   NSInteger fps = 30;
+  NSInteger maxWidth = 0;
+  NSInteger maxHeight = 0;
+  // Default NO: do not bake OS cursor into frames (controller draws local cursor).
+  BOOL showCursor = NO;
   id videoConstraints = constraints[@"video"];
   if ([videoConstraints isKindOfClass:[NSNumber class]] && [videoConstraints boolValue] == YES) {
     useDefaultScreen = YES;
@@ -133,11 +137,47 @@ NSArray<RTCDesktopSource*>* _captureSources;
       // fall back to default screen if no deviceId is specified
       useDefaultScreen = YES;
     }
+    id cursorConstraint = videoConstraints[@"cursor"];
+    if ([cursorConstraint isKindOfClass:[NSString class]]) {
+      NSString* cursor = [(NSString*)cursorConstraint lowercaseString];
+      showCursor = [cursor isEqualToString:@"always"] || [cursor isEqualToString:@"true"];
+    } else if ([cursorConstraint isKindOfClass:[NSNumber class]]) {
+      showCursor = [(NSNumber*)cursorConstraint boolValue];
+    }
     id mandatory = videoConstraints[@"mandatory"];
     if (mandatory != nil && [mandatory isKindOfClass:[NSDictionary class]]) {
       id frameRate = mandatory[@"frameRate"];
-      if (frameRate != nil && [frameRate isKindOfClass:[NSNumber class]]) {
-        fps = [frameRate integerValue];
+      if (frameRate == nil) {
+        frameRate = mandatory[@"maxFrameRate"];
+      }
+      if (frameRate != nil) {
+        if ([frameRate isKindOfClass:[NSNumber class]]) {
+          fps = [frameRate integerValue];
+        } else if ([frameRate isKindOfClass:[NSString class]]) {
+          fps = [frameRate integerValue];
+        }
+      }
+      id mw = mandatory[@"maxWidth"];
+      if (mw == nil) {
+        mw = mandatory[@"minWidth"];
+      }
+      if (mw != nil) {
+        if ([mw isKindOfClass:[NSNumber class]]) {
+          maxWidth = [mw integerValue];
+        } else if ([mw isKindOfClass:[NSString class]]) {
+          maxWidth = [mw integerValue];
+        }
+      }
+      id mh = mandatory[@"maxHeight"];
+      if (mh == nil) {
+        mh = mandatory[@"minHeight"];
+      }
+      if (mh != nil) {
+        if ([mh isKindOfClass:[NSNumber class]]) {
+          maxHeight = [mh integerValue];
+        } else if ([mh isKindOfClass:[NSString class]]) {
+          maxHeight = [mh integerValue];
+        }
       }
     }
   }
@@ -146,6 +186,9 @@ NSArray<RTCDesktopSource*>* _captureSources;
                        sourceId:nil
                        capturer:nil
                             fps:fps
+                       maxWidth:maxWidth
+                      maxHeight:maxHeight
+                     showCursor:showCursor
                     mediaStream:mediaStream
                     videoSource:videoSource
                         trackId:trackUUID
@@ -173,6 +216,9 @@ NSArray<RTCDesktopSource*>* _captureSources;
                          sourceId:sourceId
                          capturer:desktopCapturer
                               fps:fps
+                         maxWidth:maxWidth
+                        maxHeight:maxHeight
+                       showCursor:showCursor
                       mediaStream:mediaStream
                       videoSource:videoSource
                           trackId:trackUUID
@@ -197,6 +243,9 @@ NSArray<RTCDesktopSource*>* _captureSources;
                      sourceId:(NSString*)sourceId
                      capturer:(RTCDesktopCapturer*)desktopCapturer
                           fps:(NSInteger)fps
+                     maxWidth:(NSInteger)maxWidth
+                    maxHeight:(NSInteger)maxHeight
+                   showCursor:(BOOL)showCursor
                   mediaStream:(RTCMediaStream*)mediaStream
                   videoSource:(RTCVideoSource*)videoSource
                       trackId:(NSString*)trackUUID
@@ -212,12 +261,15 @@ NSArray<RTCDesktopSource*>* _captureSources;
           [[FlutterScreenCaptureKitCapturer alloc] initWithDelegate:videoProcessingAdapter];
       [screenCaptureKitCapturer startCaptureWithFPS:fps
                                            sourceId:sourceId
+                                           maxWidth:maxWidth
+                                          maxHeight:maxHeight
+                                         showCursor:showCursor
                                           onStarted:^(NSError * _Nullable error) {
                                             if (error != nil) {
                                               NSLog(@"ScreenCaptureKit start failed: %@", error);
                                             } else {
-                                              NSLog(@"start screencapturekit capture: for  sourceId: %@, fps: %lu",
-                                                    sourceId, fps);
+                                              NSLog(@"start screencapturekit capture: for  sourceId: %@, fps: %lu, showCursor: %d",
+                                                    sourceId, fps, showCursor);
                                             }
                                           }];
     } else {

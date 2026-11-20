@@ -19,6 +19,10 @@
 #include "rtc_desktop_capturer.h"
 #include "rtc_desktop_media_list.h"
 
+#if defined(_WIN32)
+#include "flutter_gdi_desktop_pump.h"
+#endif
+
 namespace flutter_webrtc_plugin {
 
 class FlutterScreenCapture : public MediaListObserver,
@@ -67,6 +71,15 @@ class FlutterScreenCapture : public MediaListObserver,
   // Copies of `sources_` and a lookup in it, taken under `sources_mutex_`.
   std::vector<scoped_refptr<MediaSource>> SourcesSnapshot();
   scoped_refptr<MediaSource> FindSource(const std::string& source_id);
+  scoped_refptr<MediaSource> ResolveDisplaySource(
+      const std::string& source_id);
+#if defined(_WIN32)
+  bool StartGdiPrimaryDesktop(const std::string& uuid,
+                              scoped_refptr<RTCMediaStream> stream,
+                              EncodableMap* params,
+                              const EncodableMap& video_constraints,
+                              double fps);
+#endif
 
   // Runs `task` on `worker_thread_`, in order with the other queued tasks.
   void PostToWorker(std::function<void()> task);
@@ -126,8 +139,10 @@ class FlutterScreenCapture : public MediaListObserver,
   // Loopback audio capturer active during a screen-share session.
   // Null when not capturing or on platforms without loopback support.
   std::unique_ptr<LoopbackCapturer> loopback_capturer_;
-  // The custom audio source fed by the loopback capturer.
   scoped_refptr<RTCAudioSource> loopback_audio_source_;
+#if defined(_WIN32)
+  std::unique_ptr<GdiDesktopPump> gdi_pump_;
+#endif
 };
 
 }  // namespace flutter_webrtc_plugin

@@ -118,20 +118,23 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
         //checkNotDisposed();
 
         this.isPortrait = isDeviceOrientationPortrait();
+        int safeW = width > 0 ? width : 720;
+        int safeH = height > 0 ? height : 1280;
         if (this.isPortrait) {
-            this.width = width;
-            this.height = height;
+            this.width = safeW;
+            this.height = safeH;
         } else {
-            this.height = width;
-            this.width = height;
+            this.height = safeW;
+            this.width = safeH;
         }
         this.oldWidth = this.width;
         this.oldHeight = this.height;
 
         mediaProjection = mediaProjectionManager.getMediaProjection(
                 Activity.RESULT_OK, mediaProjectionPermissionResultData);
-
-        // Let MediaProjection callback use the SurfaceTextureHelper thread.
+        if (mediaProjection == null) {
+            throw new RuntimeException("getMediaProjection returned null");
+        }
         mediaProjection.registerCallback(mediaProjectionCallback, surfaceTextureHelper.getHandler());
 
         createVirtualDisplay();

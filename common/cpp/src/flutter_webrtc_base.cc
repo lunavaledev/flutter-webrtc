@@ -4,6 +4,7 @@
 #include "flutter_peerconnection.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 
 #include "helper.h"
@@ -72,6 +73,9 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
                                       kFieldTrialZeroPlayoutDelayValue));
   }
 
+  field_trials.push_back(
+      EnabledFieldTrial(kRTCFieldTrialH264HighProfileKey));
+
   if (field_trials.empty()) {
     LibWebRTC::Initialize();
   } else {
@@ -95,6 +99,18 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
 
 EventChannelProxy* FlutterWebRTCBase::event_channel() {
   return event_channel_ ? event_channel_.get() : nullptr;
+}
+
+void FlutterWebRTCBase::SetAdmVolumes(double speaker01, double microphone01) {
+  EnsureWebRTCInitialized();
+  if (audio_device_.get() == nullptr) return;
+  auto to255 = [](double v) -> uint32_t {
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    return static_cast<uint32_t>(v * 255.0 + 0.5);
+  };
+  audio_device_->SetSpeakerVolume(to255(speaker01));
+  audio_device_->SetMicrophoneVolume(to255(microphone01));
 }
 
 std::string FlutterWebRTCBase::GenerateUUID() {
@@ -306,47 +322,60 @@ scoped_refptr<RTCMediaConstraints> FlutterWebRTCBase::ParseMediaConstraints(
 
 bool FlutterWebRTCBase::CreateIceServers(const EncodableList& iceServersArray,
                                          IceServer* ice_servers) {
-  size_t size = iceServersArray.size();
-  for (size_t i = 0; i < size; i++) {
-    IceServer& ice_server = ice_servers[i];
-    EncodableMap iceServerMap = GetValue<EncodableMap>(iceServersArray[i]);
+  size_t out = 0;
+  auto append = [&](const std::string& uri, const std::string& username,
+                    const std::string& password) {
+    if (uri.empty() || out >= static_cast<size_t>(kMaxIceServerSize)) {
+      return;
+    }
+    ice_servers[out].uri = uri;
+    ice_servers[out].username = username;
+    ice_servers[out].password = password;
+    ++out;
+  };
 
+  for (size_t i = 0; i < iceServersArray.size(); i++) {
+    EncodableMap iceServerMap = GetValue<EncodableMap>(iceServersArray[i]);
+    std::string username;
+    std::string password;
     if (iceServerMap.find(EncodableValue("username")) != iceServerMap.end()) {
-      ice_server.username = GetValue<std::string>(
+      username = GetValue<std::string>(
           iceServerMap.find(EncodableValue("username"))->second);
     }
     if (iceServerMap.find(EncodableValue("credential")) != iceServerMap.end()) {
-      ice_server.password = GetValue<std::string>(
+      password = GetValue<std::string>(
           iceServerMap.find(EncodableValue("credential"))->second);
     }
 
+    std::vector<std::string> uris;
     auto it = iceServerMap.find(EncodableValue("url"));
     if (it != iceServerMap.end() && TypeIs<std::string>(it->second)) {
-      ice_server.uri = GetValue<std::string>(it->second);
+      uris.push_back(GetValue<std::string>(it->second));
     }
     it = iceServerMap.find(EncodableValue("urls"));
     if (it != iceServerMap.end()) {
       if (TypeIs<std::string>(it->second)) {
-        ice_server.uri = GetValue<std::string>(it->second);
-      }
-      if (TypeIs<EncodableList>(it->second)) {
+        uris.push_back(GetValue<std::string>(it->second));
+      } else if (TypeIs<EncodableList>(it->second)) {
         const EncodableList urls = GetValue<EncodableList>(it->second);
         for (auto url : urls) {
           if (TypeIs<EncodableMap>(url)) {
             const EncodableMap map = GetValue<EncodableMap>(url);
-            std::string value;
             auto it2 = map.find(EncodableValue("url"));
             if (it2 != map.end()) {
-              ice_server.uri = GetValue<std::string>(it2->second);
+              uris.push_back(GetValue<std::string>(it2->second));
             }
           } else if (TypeIs<std::string>(url)) {
-            ice_server.uri = GetValue<std::string>(url);
+            uris.push_back(GetValue<std::string>(url));
           }
         }
       }
     }
+    for (const auto& uri : uris) {
+      append(uri, username, password);
+    }
   }
-  return size > 0;
+  return out > 0;
 }
 
 bool FlutterWebRTCBase::ParseRTCConfiguration(const EncodableMap& map,

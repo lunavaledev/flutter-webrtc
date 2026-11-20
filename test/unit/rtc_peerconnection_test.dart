@@ -5,8 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/src/native/rtc_data_channel_impl.dart';
 import 'package:flutter_webrtc/src/native/rtc_peerconnection_impl.dart';
 
+import 'ensure_test_binding.dart';
+
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
+  ensureTestBinding();
   final channel = MethodChannel('FlutterWebRTC.Method');
   setUp(() {
     channel.setMockMethodCallHandler((MethodCall methodCall) async {

@@ -25,6 +25,8 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_utf8_sanitize.cc"
   "../common/cpp/src/flutter_peerconnection.cc"
   "../common/cpp/src/flutter_frame_capturer.cc"
+  "../common/cpp/src/flutter_host_frame_source.cc"
+  "../common/cpp/src/flutter_gdi_desktop_pump.cc"
   "../common/cpp/src/flutter_video_renderer.cc"
   "../common/cpp/src/flutter_screen_capture.cc"
   "../common/cpp/src/flutter_webrtc.cc"
@@ -56,6 +58,7 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter_wrapper_plugin
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.dll.lib"
   avrt.lib
+  gdi32.lib
   ksuser.lib
   mmdevapi.lib
   ole32.lib

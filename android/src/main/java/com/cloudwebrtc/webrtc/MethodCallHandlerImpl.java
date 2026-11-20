@@ -1890,6 +1890,8 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     track.setEnabled(false);
     if (track instanceof LocalVideoTrack) {
       getUserMediaImpl.removeVideoCapturer(trackId);
+    } else {
+      getUserMediaImpl.releaseLocalAudio();
     }
     synchronized (localTracks) {
       localTracks.remove(trackId);
@@ -2308,6 +2310,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         synchronized (localTracks) {
           localTracks.remove(trackId);
         }
+        getUserMediaImpl.releaseLocalAudio();
         stream.removeTrack(track);
       } catch (IllegalStateException e) {
         Log.d(TAG, "streamDispose(): audio track already disposed, skipping");
